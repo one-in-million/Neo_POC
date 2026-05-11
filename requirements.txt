@@ -1,0 +1,8 @@
+langchain
+langchain-community
+langchain-experimental
+langchain-cerebras
+langchain-neo4j
+python-dotenv
+requests
+streamlit
