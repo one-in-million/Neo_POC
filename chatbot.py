@@ -69,10 +69,12 @@ USER QUESTION:
 {question}
 
 INSTRUCTIONS:
-Provide a direct, concise answer to the user's question based on the data provided.
-- If it's a list of items, format it as a clean bulleted list (e.g. "Task Name (ID) - Status").
-- DO NOT use headers like "Executive Summary" or "Progress".
-- DO NOT use conversational filler like "Based on the data". Just answer the question immediately.
+- Answer directly. Do NOT say "Based on the data" or similar phrases.
+- For any list of work items, output EACH item on its OWN separate line in this exact format:
+  • [Title] ([ID]) | [Type] | [Status] | Priority: [Priority]
+- Put a blank line between each item so they are clearly separated.
+- If there are no results, say "No items found."
+- Keep answers short and scannable.
 """
 
     qa_prompt = PromptTemplate(input_variables=["context", "question"], template=qa_template)
@@ -104,8 +106,11 @@ def ask(question: str) -> dict:
     context = steps[1].get("context", []) if len(steps) > 1 else []
     answer  = result.get("result", "I couldn't analyze the project data.")
 
+    # Convert newlines to HTML line breaks so the chat bubble renders them
+    answer_html = answer.replace("\n\n", "<br><br>").replace("\n", "<br>")
+
     return {
-        "answer":  answer,
+        "answer":  answer_html,
         "cypher":  cypher,
         "context": context,
     }
