@@ -76,6 +76,11 @@ def flatten_items(items: list, parent_uuid: str | None = None, result: list | No
 def clean_item(item: dict, project_uuid: str) -> dict:
     assignee_uuid = item.get("workItemAssigneeAppUserUuid") or ""
     reporter_uuid = item.get("workItemReporterAppUserUuid") or ""
+    
+    # Dynamically pull names from API instead of hardcoding
+    assignee_name = item.get("workItemAssigneeName") or "Unassigned"
+    reporter_name = item.get("workItemReporterName") or "Unknown Reporter"
+    
     return {
         "uuid":           item.get("workItemUuid"),
         "projectUuid":    project_uuid,  # Tag for smart deletion
@@ -94,9 +99,9 @@ def clean_item(item: dict, project_uuid: str) -> dict:
         "loggedMinutes":  item.get("totalLoggedMinutes", 0),
         "loggedTime":     item.get("totalLoggedTime", "0m"),
         "assigneeUuid":   assignee_uuid,
-        "assigneeName":   USER_MAPPING.get(assignee_uuid, "Unknown User") if assignee_uuid else "",
+        "assigneeName":   assignee_name,
         "reporterUuid":   reporter_uuid,
-        "reporterName":   USER_MAPPING.get(reporter_uuid, "Unknown User") if reporter_uuid else "",
+        "reporterName":   reporter_name,
     }
 
 # ── Class: WorklapGraphSync ───────────────────────────────────────────────────
