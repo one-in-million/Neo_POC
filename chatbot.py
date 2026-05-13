@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from langchain_neo4j import Neo4jGraph, GraphCypherQAChain
 from langchain_cerebras import ChatCerebras
 from langchain_core.prompts import PromptTemplate
+from prompts import get_cypher_template
 
 load_dotenv()
 
@@ -24,60 +25,9 @@ def get_chain() -> GraphCypherQAChain:
     project_name = os.getenv("WORKLAP_PROJECT_NAME", "UNasa")
     project_uuid = os.getenv("WORKLAP_PROJECT_UUID")
 
-    # ── Cypher Generation Prompt ──
-    # Note: Double curly braces {{ }} for PromptTemplate
-    cypher_template = f"""You are an expert Neo4j Cypher query writer for Worklap.
-
-PROJECT CONTEXT:
-- Project Name: "{project_name}"
-- Project UUID: "{project_uuid}"
-
-GRAPH SCHEMA:
-Nodes:
-- Project (name, key, uuid)
-- Epic, Story, Task, Bug, Subtask (id, name, title, priority, status)
-- User (name, uuid)
-
-Relationships:
-- (Project)-[:HAS_EPIC]->(Epic)
-- (Project)-[:HAS_ITEM]->(Story|Task|Bug)
-- (Epic|Story|Task|Bug)-[:HAS_CHILD]->(child)
-- (w)-[:ASSIGNED_TO|REPORTED_TO]->(User)
-
-RULES:
-1. ALWAYS use toLower() and CONTAINS for status matching. NEVER use exact matches like {{{{status: 'inprogress'}}}}.
-   CORRECT EXAMPLE: MATCH (t:Task) WHERE toLower(t.status) CONTAINS toLower('in progress') RETURN t
-2. Map these exact phrases: "todo" -> "to do", "inprogress" -> "in progress".
-3. To list all items of a type, just match the label: MATCH (b:Bug) RETURN b
-4. DO NOT filter items by the Project UUID unless searching for Project specifically.
-5. If searching for Project specifically, use: MATCH (p:Project {{{{uuid: "{project_uuid}"}}}})
-
-Schema:
-{{schema}}
-
-Question: {{question}}
-Cypher Query:"""
-
+    cypher_template = get_cypher_template(project_uuid=project_uuid, project_name=project_name)
     cypher_prompt = PromptTemplate(input_variables=["schema", "question"], template=cypher_template)
 
-    qa_template = """You are a helpful AI Assistant for Worklap.
-
-DATA FROM DATABASE:
-{context}
-
-USER QUESTION:
-{question}
-
-INSTRUCTIONS:
-- Answer directly. Do NOT say "Based on the data" or similar phrases.
-- For any list of work items, output EACH item on its OWN separate line in this exact format:
-  • [Title] ([ID]) | [Type] | [Status] | Priority: [Priority]
-- Put a blank line between each item so they are clearly separated.
-- If there are no results, say "No items found."
-- Keep answers short and scannable.
-"""
-
-    qa_prompt = PromptTemplate(input_variables=["context", "question"], template=qa_template)
 
     llm = ChatCerebras(
         model="llama-3.1-8b",
@@ -89,25 +39,73 @@ INSTRUCTIONS:
         llm=llm,
         graph=graph,
         cypher_prompt=cypher_prompt,
-        qa_prompt=qa_prompt,
         verbose=True,
         return_intermediate_steps=True,
-        return_direct=False, 
+        return_direct=True,
         allow_dangerous_requests=True,
     )
     return _chain
+
+def _format_context(context: list) -> str:
+    """Format Neo4j results into clean output. Handles both lists and aggregates."""
+    if not context:
+        return "No items found matching your request."
+
+    # Detect if this is a simple aggregate/scalar result (e.g. COUNT, SUM)
+    WORK_ITEM_KEYS = {"title", "name", "id", "status", "priority", "type"}
+    first = context[0] if context else {}
+    is_aggregate = not any(k in first for k in WORK_ITEM_KEYS)
+
+    if is_aggregate:
+        # Just print the key-value pairs directly (e.g. "total_workitems: 10")
+        lines = []
+        for row in context:
+            lines.append(", ".join(f"**{k}**: {v}" for k, v in row.items()))
+        return "\n".join(lines)
+
+    # Full work item formatting — deduplicate by id to handle multiple graph paths
+    seen_ids = set()
+    lines = []
+    for item in context:
+        title    = item.get("title") or item.get("name") or "Untitled"
+        item_id  = item.get("id", "")
+        itype    = item.get("type", "")
+        status   = item.get("status", "")
+        priority = item.get("priority", "")
+        # Skip duplicates
+        dedup_key = item_id or title
+        if dedup_key in seen_ids:
+            continue
+        seen_ids.add(dedup_key)
+        parts = [f"**{title}**"]
+        if item_id:  parts.append(f"({item_id})")
+        if itype:    parts.append(f"| {itype}")
+        if status:   parts.append(f"| {status}")
+        if priority: parts.append(f"| {priority}")
+        lines.append("• " + " ".join(parts))
+    return "\n".join(lines)
+
 
 def ask(question: str) -> dict:
     chain = get_chain()
     result = chain.invoke({"query": question})
 
-    steps   = result.get("intermediate_steps", [])
-    cypher  = steps[0].get("query", "") if len(steps) > 0 else ""
-    context = steps[1].get("context", []) if len(steps) > 1 else []
-    answer  = result.get("result", "I couldn't analyze the project data.")
+    steps  = result.get("intermediate_steps", [])
+    cypher = steps[0].get("query", "") if len(steps) > 0 else ""
 
-    # Convert newlines to HTML line breaks so the chat bubble renders them
-    answer_html = answer.replace("\n\n", "<br><br>").replace("\n", "<br>")
+    # With return_direct=True, raw Neo4j rows are in result["result"] (a list).
+    raw = result.get("result", [])
+    context = raw if isinstance(raw, list) else steps[1].get("context", []) if len(steps) > 1 else []
+
+    # Print raw context to the terminal for debugging
+    print("\n🔍 GENERATED CYPHER:", flush=True)
+    print(cypher, flush=True)
+    print("\n📦 RAW DATABASE RESULTS:", flush=True)
+    print(context, flush=True)
+    print("─" * 50, flush=True)
+
+    # Format directly in Python — no QA LLM, no hallucination possible
+    answer_html = _format_context(context).replace("\n", "<br>")
 
     return {
         "answer":  answer_html,
