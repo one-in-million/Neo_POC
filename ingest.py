@@ -21,45 +21,17 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "95ee6f84")
 
 # ── User name mapping (UUID → Name) ───────────────────────────────────────────
-# Add all your team member UUIDs and names here.
-# Run inspect_api.py to find UUIDs from the raw API data.
 USER_MAPPING = {
-    "867a7473-77c0-41cc-9c34-ee6925d5df20": "Uday Hiremath",
-    "9775ed57-76fb-48f4-af9e-664e3c8d5b20": "Admin User",
+    "ecd5b269-8d12-47ec-a27e-a034e334a58c": "sai yagnik",
+    "84f3b185-9076-4cda-b846-54560257da9a": "Bhoomika MS",
+    "362d7e8f-1526-4b2f-bfba-296be61730a9": "pushpanathan N",
+    "867a7473-77c0-41cc-9c34-ee6925d5df20": "bhoomi ms",
+    "f7a615c7-8f65-477a-841f-04e802812c2a": "Sri Sai Yagnik",
+    "9775ed57-76fb-48f4-af9e-664e3c8d5b20": "Uday Hiremath",
 }
 
-# ── Step 1: Fetch & Flatten ───────────────────────────────────────────────────
-def fetch_work_items() -> dict:
-    headers = {
-        "Authorization": f"Bearer {JWT_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "projectUuid": PROJECT_UUID,
-        "page": 0, "size": 1000,
-        "childPage": 0, "childSize": 1000,
-        "viewType": "LIST",
-    }
-    resp = requests.post(API_URL, json=payload, headers=headers, timeout=30)
-    resp.raise_for_status()
-    response_data = resp.json()["response"][0]
-    # Try several possible keys for project name
-    project_name = (
-        response_data.get("projectName")
-        or response_data.get("name")
-        or response_data.get("project", {}).get("name")
-        or "UNasa"
-    )
-    project_key = (
-        response_data.get("projectKey")
-        or response_data.get("key")
-        or PROJECT_UUID[:8]
-    )
-    return {
-        "items":       response_data["data"],
-        "projectName": project_name,
-        "projectKey":  project_key,
-    }
+
+
 
 # ── Step 1: Flatten & Clean ───────────────────────────────────────────────────
 def flatten_items(items: list, parent_uuid: str | None = None, result: list | None = None) -> list:
@@ -77,9 +49,9 @@ def clean_item(item: dict, project_uuid: str) -> dict:
     assignee_uuid = item.get("workItemAssigneeAppUserUuid") or ""
     reporter_uuid = item.get("workItemReporterAppUserUuid") or ""
     
-    # Dynamically pull names from API instead of hardcoding
-    assignee_name = item.get("workItemAssigneeName") or "Unassigned"
-    reporter_name = item.get("workItemReporterName") or "Unknown Reporter"
+    # Use the mapping dictionary to get actual names
+    assignee_name = USER_MAPPING.get(assignee_uuid, "Unassigned") if assignee_uuid else "Unassigned"
+    reporter_name = USER_MAPPING.get(reporter_uuid, "Unknown Reporter") if reporter_uuid else "Unknown Reporter"
     
     return {
         "uuid":           item.get("workItemUuid"),
@@ -92,8 +64,8 @@ def clean_item(item: dict, project_uuid: str) -> dict:
         "priority":       item.get("workPriority", "MEDIUM"),
         "status":         item.get("workStatusName", "Unknown"),
         "statusCategory": item.get("workStatusCategory", ""),
-        "createdDate":    item.get("createdDate"),
-        "lastModifiedAt": item.get("lastModifiedAt"),
+        "createdDate":    (item.get("createdDate") or "")[:19],   # Trim to "YYYY-MM-DDTHH:MM:SS"
+        "lastModifiedAt": (item.get("lastModifiedAt") or "")[:19],
         "subtaskCount":   item.get("totalSubTasksCount", 0),
         "commentsCount":  item.get("totalCommentsCount", 0),
         "loggedMinutes":  item.get("totalLoggedMinutes", 0),
@@ -125,10 +97,17 @@ class WorklapGraphSync:
         resp = requests.post(self.api_url, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()["response"][0]
+        items = data["data"]
+        
+        # Dynamically extract the REAL Project Key from the work items (e.g., P056-074 -> P056)
+        project_key = project_uuid[:8]  # Fallback if empty
+        if items and items[0].get("workItemKey"):
+            project_key = items[0]["workItemKey"].split("-")[0]
+
         return {
-            "items": data["data"],
-            "projectName": data.get("projectName") or data.get("name") or "UNasa",
-            "projectKey": data.get("projectKey") or data.get("key") or project_uuid[:8]
+            "items": items,
+            "projectName": project_uuid,
+            "projectKey": project_key
         }
 
     def sync_project(self, project_uuid: str) -> dict:
@@ -169,7 +148,7 @@ class WorklapGraphSync:
             
             self.graph.query(f"""
                 UNWIND $data AS row
-                MERGE (w:{label} {{uuid: row.uuid}})
+                MERGE (w:{label}:WorkItem {{uuid: row.uuid}})
                 SET w.projectUuid    = row.projectUuid,
                     w.id             = row.id,
                     w.name           = row.title,
@@ -177,7 +156,11 @@ class WorklapGraphSync:
                     w.type           = row.type,
                     w.priority       = row.priority,
                     w.status         = row.status,
-                    w.statusCategory = row.statusCategory
+                    w.statusCategory = row.statusCategory,
+                    w.createdDate    = CASE WHEN row.createdDate IS NOT NULL AND row.createdDate <> '' THEN datetime(row.createdDate) ELSE null END,
+                    w.lastModifiedAt = CASE WHEN row.lastModifiedAt IS NOT NULL AND row.lastModifiedAt <> '' THEN datetime(row.lastModifiedAt) ELSE null END,
+                    w.assigneeName   = row.assigneeName,
+                    w.reporterName   = row.reporterName
             """, params={"data": items})
 
         # 5. Build Hierarchy (Parent -> Child)
@@ -202,6 +185,36 @@ class WorklapGraphSync:
             MATCH (p:Project {uuid: $projectUuid}), (w {uuid: row.uuid})
             MERGE (p)-[:HAS_ITEM]->(w)
         """, params={"data": cleaned, "projectUuid": project_uuid})
+
+        # 7. Create User nodes
+        self.graph.query("""
+            UNWIND $data AS row
+            WITH row WHERE row.assigneeUuid <> ''
+            MERGE (u:User {uuid: row.assigneeUuid})
+            SET u.name = row.assigneeName
+        """, params={"data": cleaned})
+
+        self.graph.query("""
+            UNWIND $data AS row
+            WITH row WHERE row.reporterUuid <> ''
+            MERGE (r:User {uuid: row.reporterUuid})
+            SET r.name = row.reporterName
+        """, params={"data": cleaned})
+
+        # 8. Link Users (ASSIGNED_TO / REPORTED_TO)
+        self.graph.query("""
+            UNWIND $data AS row
+            WITH row WHERE row.assigneeUuid <> ''
+            MATCH (w {uuid: row.uuid}), (u:User {uuid: row.assigneeUuid})
+            MERGE (w)-[:ASSIGNED_TO]->(u)
+        """, params={"data": cleaned})
+
+        self.graph.query("""
+            UNWIND $data AS row
+            WITH row WHERE row.reporterUuid <> ''
+            MATCH (w {uuid: row.uuid}), (r:User {uuid: row.reporterUuid})
+            MERGE (w)-[:REPORTED_TO]->(r)
+        """, params={"data": cleaned})
 
         self.graph.refresh_schema()
         print("Sync Complete!")
